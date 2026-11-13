@@ -1,0 +1,401 @@
+package com.example.reconocimientofacial
+
+import android.Manifest
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.os.Bundle
+import android.view.Surface
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import androidx.exifinterface.media.ExifInterface
+import com.example.reconocimientofacial.ui.theme.ReconocimientoFacialMovilTheme
+import java.io.File
+import java.util.Locale
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+
+class MainActivity : ComponentActivity() {
+
+    private val statusState =
+        mutableStateOf("Preparando motor dlib offline...")
+    private val personState = mutableStateOf("Sin resultado")
+    private val distanceState = mutableStateOf("â€”")
+
+    private var previewView: PreviewView? = null
+    private var cameraProvider: ProcessCameraProvider? = null
+    private var imageCapture: ImageCapture? = null
+    private var recognizer: DlibOfflineRecognizer? = null
+
+    private val captureExecutor: ExecutorService =
+        Executors.newSingleThreadExecutor()
+
+    private val cameraPermissionLauncher =
+        registerForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { granted ->
+            if (granted) {
+                startCamera()
+            } else {
+                statusState.value =
+                    "Debes conceder permiso para utilizar la cÃ¡mara."
+            }
+        }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        initializeRecognition()
+
+        setContent {
+            ReconocimientoFacialMovilTheme {
+                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(innerPadding)
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = "NEXUS FACE ID Â· DLIB OFFLINE",
+                            style = MaterialTheme.typography.headlineSmall
+                        )
+
+                        Text(
+                            text = statusState.value,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+
+                        AndroidView(
+                            factory = { context ->
+                                PreviewView(context).apply {
+                                    scaleType = PreviewView.ScaleType.FILL_CENTER
+                                    implementationMode =
+                                        PreviewView.ImplementationMode.COMPATIBLE
+                                    previewView = this
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f)
+                        )
+
+                        Text(
+                            text = "Identidad: ${personState.value}",
+                            style = MaterialTheme.typography.titleLarge
+                        )
+
+                        Text(
+                            text = "Distancia dlib: ${distanceState.value} (menor = mÃ¡s cercano)"
+                        )
+
+                        Text(
+                            text = "Umbral inicial: 0.50. No equivale a un porcentaje de fiabilidad."
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = {
+                                    if (
+                                        ContextCompat.checkSelfPermission(
+                                            this@MainActivity,
+                                            Manifest.permission.CAMERA
+                                        ) == PackageManager.PERMISSION_GRANTED
+                                    ) {
+                                        startCamera()
+                                    } else {
+                                        cameraPermissionLauncher.launch(
+                                            Manifest.permission.CAMERA
+                                        )
+                                    }
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Abrir cÃ¡mara")
+                            }
+
+                            OutlinedButton(
+                                onClick = { takePhotoAndRecognize() },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Tomar foto")
+                            }
+                        }
+
+                        OutlinedButton(
+                            onClick = { stopCamera() },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Detener cÃ¡mara")
+                        }
+
+                        Spacer(modifier = Modifier.height(2.dp))
+                    }
+                }
+            }
+        }
+    }
+
+    private fun initializeRecognition() {
+        try {
+            recognizer = DlibOfflineRecognizer(applicationContext)
+            statusState.value =
+                NativeFaceBridge.nativeStatus() +
+                    ". Abre la cÃ¡mara y toma una foto para analizarla."
+        } catch (error: UnsatisfiedLinkError) {
+            statusState.value =
+                "No se pudo cargar libnexusface.so. Revisa la compilaciÃ³n CMake."
+        } catch (error: Exception) {
+            statusState.value =
+                "No se pudo iniciar el motor: " +
+                    (error.message ?: error.javaClass.simpleName)
+        }
+    }
+
+    private fun startCamera() {
+        val preview = previewView
+        if (preview == null) {
+            statusState.value =
+                "La vista de cÃ¡mara todavÃ­a no estÃ¡ preparada."
+            return
+        }
+
+        statusState.value = "Iniciando cÃ¡mara..."
+
+        val future = ProcessCameraProvider.getInstance(this)
+        future.addListener({
+            try {
+                val provider = future.get()
+                cameraProvider = provider
+
+                val rotation = preview.display?.rotation ?: Surface.ROTATION_0
+
+                val cameraPreview = Preview.Builder()
+                    .build()
+                    .also {
+                        it.setSurfaceProvider(preview.surfaceProvider)
+                    }
+
+                val capture = ImageCapture.Builder()
+                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                    .setTargetRotation(rotation)
+                    .build()
+
+                provider.unbindAll()
+                provider.bindToLifecycle(
+                    this,
+                    CameraSelector.DEFAULT_FRONT_CAMERA,
+                    cameraPreview,
+                    capture
+                )
+
+                imageCapture = capture
+                statusState.value =
+                    "CÃ¡mara activa. Centra el rostro, busca buena luz y pulsa Tomar foto."
+            } catch (error: Exception) {
+                statusState.value =
+                    "No se pudo iniciar la cÃ¡mara: " +
+                        (error.message ?: "Error desconocido")
+            }
+        }, ContextCompat.getMainExecutor(this))
+    }
+
+    private fun takePhotoAndRecognize() {
+        val capture = imageCapture
+        val engine = recognizer
+
+        if (capture == null) {
+            statusState.value = "Primero pulsa Abrir cÃ¡mara."
+            return
+        }
+        if (engine == null) {
+            statusState.value = "El motor dlib no estÃ¡ disponible."
+            return
+        }
+
+        personState.value = "Analizando..."
+        distanceState.value = "â€”"
+        statusState.value =
+            "Capturando y analizando localmente. La primera ejecuciÃ³n puede tardar."
+
+        val photoFile = File(
+            cacheDir,
+            "nexus_capture_${System.currentTimeMillis()}.jpg"
+        )
+        val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
+
+        capture.takePicture(
+            outputOptions,
+            captureExecutor,
+            object : ImageCapture.OnImageSavedCallback {
+                override fun onImageSaved(
+                    outputFileResults: ImageCapture.OutputFileResults
+                ) {
+                    var bitmap: Bitmap? = null
+                    var orientedBitmap: Bitmap? = null
+
+                    try {
+                        bitmap = BitmapFactory.decodeFile(photoFile.absolutePath)
+                            ?: error("No se pudo leer la foto capturada.")
+
+                        val orientation = ExifInterface(photoFile).getAttributeInt(
+                            ExifInterface.TAG_ORIENTATION,
+                            ExifInterface.ORIENTATION_NORMAL
+                        )
+                        orientedBitmap = applyExifOrientation(bitmap, orientation)
+
+                        val sourceBitmap = orientedBitmap
+                            ?: error("No se pudo orientar la fotografia.")
+
+                        // Reducir la imagen para limitar el consumo de memoria.
+                        val largestSide = maxOf(sourceBitmap.width, sourceBitmap.height)
+                        val analysisBitmap = if (largestSide > 960) {
+                            val scale = 960f / largestSide.toFloat()
+                            Bitmap.createScaledBitmap(
+                                sourceBitmap,
+                                (sourceBitmap.width * scale).toInt().coerceAtLeast(1),
+                                (sourceBitmap.height * scale).toInt().coerceAtLeast(1),
+                                true
+                            )
+                        } else {
+                            sourceBitmap
+                        }
+
+                        android.util.Log.i(
+                            "NEXUS_FACE",
+                            "Inicio dlib: ${analysisBitmap.width}x${analysisBitmap.height}"
+                        )
+
+                        val result = try {
+                            engine.recognize(analysisBitmap)
+                        } finally {
+                            if (analysisBitmap !== sourceBitmap) {
+                                analysisBitmap.recycle()
+                            }
+                        }
+
+                        android.util.Log.i(
+                            "NEXUS_FACE",
+                            "Fin dlib: ${result.message}"
+                        )
+
+                        runOnUiThread {
+                            personState.value =
+                                if (result.accepted) {
+                                    result.personName ?: "Desconocido"
+                                } else {
+                                    "Desconocido"
+                                }
+
+                            distanceState.value = result.distance?.let {
+                                String.format(Locale.US, "%.3f", it)
+                            } ?: "â€”"
+
+                            statusState.value = result.message
+                        }
+                    } catch (error: UnsatisfiedLinkError) {
+                        runOnUiThread {
+                            statusState.value =
+                                "No se pudo cargar el motor nativo: ${error.message}"
+                        }
+                    } catch (error: Exception) {
+                        runOnUiThread {
+                            statusState.value =
+                                "Error de reconocimiento: " +
+                                    (error.message ?: error.javaClass.simpleName)
+                        }
+                    } finally {
+                        if (
+                            orientedBitmap != null &&
+                            orientedBitmap !== bitmap
+                        ) {
+                            orientedBitmap.recycle()
+                        }
+                        bitmap?.recycle()
+                        photoFile.delete()
+                    }
+                }
+
+                override fun onError(exception: ImageCaptureException) {
+                    photoFile.delete()
+                    runOnUiThread {
+                        statusState.value =
+                            "No se pudo tomar la foto: " +
+                                (exception.message ?: "Error desconocido")
+                    }
+                }
+            }
+        )
+    }
+
+    private fun applyExifOrientation(bitmap: Bitmap, orientation: Int): Bitmap {
+        val matrix = Matrix()
+        when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.preScale(-1f, 1f)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.preScale(1f, -1f)
+            ExifInterface.ORIENTATION_TRANSPOSE -> {
+                matrix.preScale(-1f, 1f)
+                matrix.postRotate(90f)
+            }
+            ExifInterface.ORIENTATION_TRANSVERSE -> {
+                matrix.preScale(-1f, 1f)
+                matrix.postRotate(270f)
+            }
+            else -> return bitmap
+        }
+
+        return Bitmap.createBitmap(
+            bitmap,
+            0,
+            0,
+            bitmap.width,
+            bitmap.height,
+            matrix,
+            true
+        )
+    }
+
+    private fun stopCamera() {
+        cameraProvider?.unbindAll()
+        imageCapture = null
+        statusState.value = "CÃ¡mara detenida."
+    }
+
+    override fun onDestroy() {
+        cameraProvider?.unbindAll()
+        captureExecutor.shutdownNow()
+        super.onDestroy()
+    }
+}

@@ -1,0 +1,469 @@
+package com.example.reconocimientofacial
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.sp
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Surface
+
+import android.Manifest
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.os.Bundle
+import android.view.Surface
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import androidx.exifinterface.media.ExifInterface
+import com.example.reconocimientofacial.ui.theme.ReconocimientoFacialMovilTheme
+import java.io.File
+import java.util.Locale
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+
+class MainActivity : ComponentActivity() {
+
+    private val statusState =
+        mutableStateOf("Preparando motor dlib offline...")
+    private val personState = mutableStateOf("Sin resultado")
+    private val distanceState = mutableStateOf("â€”")
+
+    private var previewView: PreviewView? = null
+    private var cameraProvider: ProcessCameraProvider? = null
+    private var imageCapture: ImageCapture? = null
+    private var recognizer: DlibOfflineRecognizer? = null
+
+    private val captureExecutor: ExecutorService =
+        Executors.newSingleThreadExecutor()
+
+    private val cameraPermissionLauncher =
+        registerForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { granted ->
+            if (granted) {
+                startCamera()
+            } else {
+                statusState.value =
+                    "Debes conceder permiso para utilizar la cÃ¡mara."
+            }
+        }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        initializeRecognition()
+
+        setContent {
+            ReconocimientoFacialMovilTheme {
+                val bg = Color(0xFF070A12)
+                val panel = Color(0xFF111827)
+                val cyan = Color(0xFF42E8F5)
+                val purple = Color(0xFF9B7BFF)
+                val green = Color(0xFF46F0B3)
+                val muted = Color(0xFF93A4BA)
+                val status = statusState.value
+                val person = personState.value
+                val bad = status.contains("error", true) || status.contains("no se pudo", true) || status.contains("debes conceder", true)
+                val stateColor = if (bad) Color(0xFFFF6685) else if (status.contains("activo", true) || status.contains("cÃ¡mara activa", true)) green else cyan
+                val faceColor = when (person) {
+                    "Desconocido" -> Color(0xFFFF6685)
+                    "Analizando..." -> purple
+                    "Sin resultado" -> muted
+                    else -> green
+                }
+
+                Scaffold(modifier = Modifier.fillMaxSize(), containerColor = bg) { inner ->
+                    Column(
+                        modifier = Modifier.fillMaxSize()
+                            .background(Brush.verticalGradient(listOf(bg, Color(0xFF0B1220), Color(0xFF05070D))))
+                            .padding(inner).verticalScroll(rememberScrollState())
+                            .padding(horizontal = 17.dp, vertical = 15.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("NEXUS", color = cyan, fontSize = 31.sp, fontWeight = FontWeight.Black, letterSpacing = 4.sp)
+                                Text("FACE ID  /  BIOMETRIC CONTROL", color = muted, fontSize = 10.sp, letterSpacing = 1.4.sp)
+                            }
+                            Surface(modifier = Modifier.size(52.dp), shape = CircleShape, color = Color(0xFF10283A), border = BorderStroke(1.dp, cyan.copy(alpha = 0.7f))) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text("NF", color = cyan, fontSize = 16.sp, fontWeight = FontWeight.Black)
+                                }
+                            }
+                        }
+
+                        Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = panel), border = BorderStroke(1.dp, stateColor.copy(alpha = 0.35f)), elevation = CardDefaults.cardElevation(0.dp)) {
+                            Row(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Surface(modifier = Modifier.size(10.dp), shape = CircleShape, color = stateColor) {}
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(if (bad) "SYSTEM ALERT" else "NEXUS CORE  /  LOCAL", color = stateColor, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                                    Text(status, color = Color(0xFFE4ECF7), fontSize = 12.sp, lineHeight = 17.sp)
+                                }
+                            }
+                        }
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            Card(modifier = Modifier.weight(1f), shape = RoundedCornerShape(15.dp), colors = CardDefaults.cardColors(containerColor = panel), border = BorderStroke(1.dp, cyan.copy(alpha = 0.22f)), elevation = CardDefaults.cardElevation(0.dp)) {
+                                Column(modifier = Modifier.padding(11.dp)) {
+                                    Text("PERSONAS", color = muted, fontSize = 9.sp, letterSpacing = 1.sp)
+                                    Text("32", color = Color.White, fontSize = 25.sp, fontWeight = FontWeight.Bold)
+                                    Text("registradas", color = green, fontSize = 10.sp)
+                                }
+                            }
+                            Card(modifier = Modifier.weight(1f), shape = RoundedCornerShape(15.dp), colors = CardDefaults.cardColors(containerColor = panel), border = BorderStroke(1.dp, purple.copy(alpha = 0.25f)), elevation = CardDefaults.cardElevation(0.dp)) {
+                                Column(modifier = Modifier.padding(11.dp)) {
+                                    Text("ENCODINGS", color = muted, fontSize = 9.sp, letterSpacing = 1.sp)
+                                    Text("176", color = Color.White, fontSize = 25.sp, fontWeight = FontWeight.Bold)
+                                    Text("vectores dlib", color = purple, fontSize = 10.sp)
+                                }
+                            }
+                            Card(modifier = Modifier.weight(1f), shape = RoundedCornerShape(15.dp), colors = CardDefaults.cardColors(containerColor = panel), border = BorderStroke(1.dp, green.copy(alpha = 0.22f)), elevation = CardDefaults.cardElevation(0.dp)) {
+                                Column(modifier = Modifier.padding(11.dp)) {
+                                    Text("MOTOR", color = muted, fontSize = 9.sp, letterSpacing = 1.sp)
+                                    Text("DLIB", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                                    Text("offline", color = green, fontSize = 10.sp)
+                                }
+                            }
+                        }
+
+                        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text("LIVE FACIAL SCAN", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.3.sp)
+                            Spacer(modifier = Modifier.weight(1f))
+                            Text("CAM 01 â€¢ LOCAL", color = cyan, fontSize = 9.sp)
+                        }
+
+                        Box(modifier = Modifier.fillMaxWidth().height(315.dp).clip(RoundedCornerShape(22.dp)).background(Color(0xFF02050A)).border(BorderStroke(1.dp, cyan.copy(alpha = 0.55f)), RoundedCornerShape(22.dp))) {
+                            AndroidView(factory = { context ->
+                                PreviewView(context).apply {
+                                    scaleType = PreviewView.ScaleType.FILL_CENTER
+                                    implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                                    previewView = this
+                                }
+                            }, modifier = Modifier.fillMaxSize())
+                            Column(modifier = Modifier.align(Alignment.TopStart).fillMaxWidth().background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.8f), Color.Transparent))).padding(12.dp)) {
+                                Text("NEXUS VISION", color = cyan, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
+                                Text("Centra un solo rostro dentro del marco", color = Color.White, fontSize = 11.sp)
+                            }
+                            Box(modifier = Modifier.align(Alignment.Center).size(width = 185.dp, height = 220.dp).border(BorderStroke(1.5.dp, cyan.copy(alpha = 0.85f)), RoundedCornerShape(26.dp)))
+                            Text("FACE DETECTION FRAME", modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp), color = cyan, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp, textAlign = TextAlign.Center)
+                        }
+
+                        Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(19.dp), colors = CardDefaults.cardColors(containerColor = panel), border = BorderStroke(1.dp, faceColor.copy(alpha = 0.35f)), elevation = CardDefaults.cardElevation(0.dp)) {
+                            Column(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                                Text("IDENTIDAD DETECTADA", color = muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.3.sp)
+                                Text(person, color = faceColor, fontSize = 25.sp, fontWeight = FontWeight.Bold)
+                                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("DISTANCIA DLIB", color = muted, fontSize = 9.sp)
+                                        Text(distanceState.value, color = Color.White, fontSize = 15.sp)
+                                    }
+                                    Column(horizontalAlignment = Alignment.End) {
+                                        Text("UMBRAL", color = muted, fontSize = 9.sp)
+                                        Text("0.50", color = cyan, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                                Text("La distancia no es un porcentaje de confianza.", color = muted, fontSize = 10.sp)
+                            }
+                        }
+
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                            Button(onClick = {
+                                if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                                    startCamera()
+                                } else {
+                                    cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                                }
+                            }, modifier = Modifier.weight(1f).height(52.dp), shape = RoundedCornerShape(14.dp), colors = ButtonDefaults.buttonColors(containerColor = cyan, contentColor = Color(0xFF061018))) {
+                                Text("INICIAR CAMARA", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, textAlign = TextAlign.Center)
+                            }
+                            Button(onClick = { takePhotoAndRecognize() }, modifier = Modifier.weight(1f).height(52.dp), shape = RoundedCornerShape(14.dp), colors = ButtonDefaults.buttonColors(containerColor = purple, contentColor = Color.White)) {
+                                Text("ESCANEAR ROSTRO", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, textAlign = TextAlign.Center)
+                            }
+                        }
+
+                        OutlinedButton(onClick = { stopCamera() }, modifier = Modifier.fillMaxWidth().height(45.dp), shape = RoundedCornerShape(14.dp), border = BorderStroke(1.dp, muted.copy(alpha = 0.45f)), colors = ButtonDefaults.outlinedButtonColors(contentColor = muted)) {
+                            Text("DETENER CAMARA", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+
+                        Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), colors = CardDefaults.cardColors(containerColor = Color(0xFF0B101A)), border = BorderStroke(1.dp, green.copy(alpha = 0.18f)), elevation = CardDefaults.cardElevation(0.dp)) {
+                            Text("SHIELDED  â€¢  ON-DEVICE PROCESSING  â€¢  NO CLOUD", modifier = Modifier.fillMaxWidth().padding(12.dp), color = green, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp, textAlign = TextAlign.Center)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun initializeRecognition() {
+        try {
+            recognizer = DlibOfflineRecognizer(applicationContext)
+            statusState.value =
+                NativeFaceBridge.nativeStatus() +
+                    ". Abre la cÃ¡mara y toma una foto para analizarla."
+        } catch (error: UnsatisfiedLinkError) {
+            statusState.value =
+                "No se pudo cargar libnexusface.so. Revisa la compilaciÃ³n CMake."
+        } catch (error: Exception) {
+            statusState.value =
+                "No se pudo iniciar el motor: " +
+                    (error.message ?: error.javaClass.simpleName)
+        }
+    }
+
+    private fun startCamera() {
+        val preview = previewView
+        if (preview == null) {
+            statusState.value =
+                "La vista de cÃ¡mara todavÃ­a no estÃ¡ preparada."
+            return
+        }
+
+        statusState.value = "Iniciando cÃ¡mara..."
+
+        val future = ProcessCameraProvider.getInstance(this)
+        future.addListener({
+            try {
+                val provider = future.get()
+                cameraProvider = provider
+
+                val rotation = preview.display?.rotation ?: Surface.ROTATION_0
+
+                val cameraPreview = Preview.Builder()
+                    .build()
+                    .also {
+                        it.setSurfaceProvider(preview.surfaceProvider)
+                    }
+
+                val capture = ImageCapture.Builder()
+                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                    .setTargetRotation(rotation)
+                    .build()
+
+                provider.unbindAll()
+                provider.bindToLifecycle(
+                    this,
+                    CameraSelector.DEFAULT_FRONT_CAMERA,
+                    cameraPreview,
+                    capture
+                )
+
+                imageCapture = capture
+                statusState.value =
+                    "CÃ¡mara activa. Centra el rostro, busca buena luz y pulsa Tomar foto."
+            } catch (error: Exception) {
+                statusState.value =
+                    "No se pudo iniciar la cÃ¡mara: " +
+                        (error.message ?: "Error desconocido")
+            }
+        }, ContextCompat.getMainExecutor(this))
+    }
+
+    private fun takePhotoAndRecognize() {
+        val capture = imageCapture
+        val engine = recognizer
+
+        if (capture == null) {
+            statusState.value = "Primero pulsa Abrir cÃ¡mara."
+            return
+        }
+        if (engine == null) {
+            statusState.value = "El motor dlib no estÃ¡ disponible."
+            return
+        }
+
+        personState.value = "Analizando..."
+        distanceState.value = "â€”"
+        statusState.value =
+            "Capturando y analizando localmente. La primera ejecuciÃ³n puede tardar."
+
+        val photoFile = File(
+            cacheDir,
+            "nexus_capture_${System.currentTimeMillis()}.jpg"
+        )
+        val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
+
+        capture.takePicture(
+            outputOptions,
+            captureExecutor,
+            object : ImageCapture.OnImageSavedCallback {
+                override fun onImageSaved(
+                    outputFileResults: ImageCapture.OutputFileResults
+                ) {
+                    var bitmap: Bitmap? = null
+                    var orientedBitmap: Bitmap? = null
+
+                    try {
+                        bitmap = BitmapFactory.decodeFile(photoFile.absolutePath)
+                            ?: error("No se pudo leer la foto capturada.")
+
+                        val orientation = ExifInterface(photoFile).getAttributeInt(
+                            ExifInterface.TAG_ORIENTATION,
+                            ExifInterface.ORIENTATION_NORMAL
+                        )
+                        orientedBitmap = applyExifOrientation(bitmap, orientation)
+
+                        val sourceBitmap = orientedBitmap
+                            ?: error("No se pudo orientar la fotografia.")
+
+                        // Reducir la imagen para limitar el consumo de memoria.
+                        val largestSide = maxOf(sourceBitmap.width, sourceBitmap.height)
+                        val analysisBitmap = if (largestSide > 960) {
+                            val scale = 960f / largestSide.toFloat()
+                            Bitmap.createScaledBitmap(
+                                sourceBitmap,
+                                (sourceBitmap.width * scale).toInt().coerceAtLeast(1),
+                                (sourceBitmap.height * scale).toInt().coerceAtLeast(1),
+                                true
+                            )
+                        } else {
+                            sourceBitmap
+                        }
+
+                        android.util.Log.i(
+                            "NEXUS_FACE",
+                            "Inicio dlib: ${analysisBitmap.width}x${analysisBitmap.height}"
+                        )
+
+                        val result = try {
+                            engine.recognize(analysisBitmap)
+                        } finally {
+                            if (analysisBitmap !== sourceBitmap) {
+                                analysisBitmap.recycle()
+                            }
+                        }
+
+                        android.util.Log.i(
+                            "NEXUS_FACE",
+                            "Fin dlib: ${result.message}"
+                        )
+
+                        runOnUiThread {
+                            personState.value =
+                                if (result.accepted) {
+                                    result.personName ?: "Desconocido"
+                                } else {
+                                    "Desconocido"
+                                }
+
+                            distanceState.value = result.distance?.let {
+                                String.format(Locale.US, "%.3f", it)
+                            } ?: "â€”"
+
+                            statusState.value = result.message
+                        }
+                    } catch (error: UnsatisfiedLinkError) {
+                        runOnUiThread {
+                            statusState.value =
+                                "No se pudo cargar el motor nativo: ${error.message}"
+                        }
+                    } catch (error: Exception) {
+                        runOnUiThread {
+                            statusState.value =
+                                "Error de reconocimiento: " +
+                                    (error.message ?: error.javaClass.simpleName)
+                        }
+                    } finally {
+                        if (
+                            orientedBitmap != null &&
+                            orientedBitmap !== bitmap
+                        ) {
+                            orientedBitmap.recycle()
+                        }
+                        bitmap?.recycle()
+                        photoFile.delete()
+                    }
+                }
+
+                override fun onError(exception: ImageCaptureException) {
+                    photoFile.delete()
+                    runOnUiThread {
+                        statusState.value =
+                            "No se pudo tomar la foto: " +
+                                (exception.message ?: "Error desconocido")
+                    }
+                }
+            }
+        )
+    }
+
+    private fun applyExifOrientation(bitmap: Bitmap, orientation: Int): Bitmap {
+        val matrix = Matrix()
+        when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.preScale(-1f, 1f)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.preScale(1f, -1f)
+            ExifInterface.ORIENTATION_TRANSPOSE -> {
+                matrix.preScale(-1f, 1f)
+                matrix.postRotate(90f)
+            }
+            ExifInterface.ORIENTATION_TRANSVERSE -> {
+                matrix.preScale(-1f, 1f)
+                matrix.postRotate(270f)
+            }
+            else -> return bitmap
+        }
+
+        return Bitmap.createBitmap(
+            bitmap,
+            0,
+            0,
+            bitmap.width,
+            bitmap.height,
+            matrix,
+            true
+        )
+    }
+
+    private fun stopCamera() {
+        cameraProvider?.unbindAll()
+        imageCapture = null
+        statusState.value = "CÃ¡mara detenida."
+    }
+
+    override fun onDestroy() {
+        cameraProvider?.unbindAll()
+        captureExecutor.shutdownNow()
+        super.onDestroy()
+    }
+}
